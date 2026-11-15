@@ -1,0 +1,122 @@
+ flafromsk import Flask, render_template, request, redirect, url_for, session, flash
+import sqlite3, os
+from werkzeug.security import generate_password_hash, check_password_hash
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key")
+DB = os.path.join(os.path.dirname(__file__), "career_navigator.db")
+
+CAREERS = {
+    "AI/ML Engineer": {"skills": ["Python", "Machine Learning", "Mathematics", "Problem Solving"], "description": "Build intelligent systems, predictive models and AI applications."},
+    "Web Developer": {"skills": ["HTML/CSS", "JavaScript", "Python", "Problem Solving"], "description": "Create websites, web applications and backend services."},
+    "Data Analyst": {"skills": ["Python", "SQL", "Statistics", "Communication"], "description": "Turn data into useful insights, reports and visualizations."},
+    "Cloud/DevOps Engineer": {"skills": ["Linux", "Cloud", "Python", "Networking"], "description": "Deploy, automate and maintain reliable software systems."},
+    "Cybersecurity Analyst": {"skills": ["Networking", "Linux", "Security", "Problem Solving"], "description": "Help protect applications, systems and networks."}
+}
+ALL_SKILLS = ["Python", "Machine Learning", "Mathematics", "Problem Solving", "HTML/CSS", "JavaScript", "SQL", "Statistics", "Communication", "Linux", "Cloud", "Networking", "Security"]
+
+def db():
+    con = sqlite3.connect(DB)
+    con.row_factory = sqlite3.Row
+    return con
+
+def init_db():
+    with db() as con:
+        con.execute("""CREATE TABLE IF NOT EXISTS users(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL, password TEXT NOT NULL)""")
+        con.execute("""CREATE TABLE IF NOT EXISTS assessments(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            skills TEXT NOT NULL, interests TEXT, top_career TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+
+@app.before_request
+def setup():
+    init_db()
+
+def login_required():
+    if "user_id" not in session:
+        flash("Please log in first.")
+        return False
+    return True
+
+def recommend(scores):
+    results = []
+    for career, info in CAREERS.items():
+        relevant = [scores.get(s, 0) for s in info["skills"]]
+        score = round(sum(relevant) / len(relevant)) if relevant else 0
+        results.append((career, score, info))
+    return sorted(results, key=lambda x: x[1], reverse=True)
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        email = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        if not name or not email or len(password) < 6:
+            flash("Enter all details. Password must be at least 6 characters.")
+            return redirect(url_for("register"))
+        try:
+            with db() as con:
+                con.execute("INSERT INTO users(name,email,password) VALUES(?,?,?)",
+                            (name, email, generate_password_hash(password)))
+            flash("Account created. Please log in.")
+            return redirect(url_for("login"))
+        except sqlite3.IntegrityError:
+            flash("That email is already registered.")
+    return render_template("register.html")
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        with db() as con:
+            user = con.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        if user and check_password_hash(user["password"], password):
+            session["user_id"], session["name"] = user["id"], user["name"]
+            return redirect(url_for("dashboard"))
+        flash("Invalid email or password.")
+    return render_template("login.html")
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("index"))
+
+@app.route("/dashboard")
+def dashboard():
+    if not login_required(): return redirect(url_for("login"))
+    with db() as con:
+        latest = con.execute("SELECT * FROM assessments WHERE user_id=? ORDER BY id DESC LIMIT 1",
+                             (session["user_id"],)).fetchone()
+    return render_template("dashboard.html", latest=latest)
+
+@app.route("/assessment", methods=["GET", "POST"])
+def assessment():
+    if not login_required(): return redirect(url_for("login"))
+    if request.method == "POST":
+        scores = {skill: int(request.form.get(skill, 0)) for skill in ALL_SKILLS}
+        interests = request.form.get("interests", "").strip()
+        ranked = recommend(scores)
+        top = ranked[0][0]
+        packed = ",".join(f"{k}:{v}" for k, v in scores.items())
+        with db() as con:
+            con.execute("INSERT INTO assessments(user_id,skills,interests,top_career) VALUES(?,?,?,?)",
+                        (session["user_id"], packed, interests, top))
+        return render_template("results.html", ranked=ranked, interests=interests)
+    return render_template("assessment.html", skills=ALL_SKILLS)
+
+@app.route("/roadmap/<career>")
+def roadmap(career):
+    if not login_required(): return redirect(url_for("login"))
+    if career not in CAREERS: return redirect(url_for("dashboard"))
+    return render_template("roadmap.html", career=career, info=CAREERS[career])
+
+if __name__ == "__main__":
+    app.run(debug=True)
